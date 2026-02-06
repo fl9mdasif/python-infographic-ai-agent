@@ -38,8 +38,17 @@ def main():
     
     with open(max(files, key=os.path.getctime), "r", encoding="utf-8") as f: content = f.read()
     
-    # Regex for new Digest format: ### [newest submissions : sub] Title
-    topics = re.findall(r'### \[.*?\] (.*)', content)[:5]
+    # Regex for Insight format: **Insight**: (Title - Summary...)
+    # We grab the first part of the Insight as the "Topic"
+    topics = []
+    matches = re.findall(r'\*\*Insight\*\*: (.*)', content)
+    for m in matches:
+        # Heuristic: split by " - " and take the first part as title, or just take the first 50 chars
+        if " - " in m:
+            topics.append(m.split(" - ")[0])
+        else:
+            topics.append(m[:60])
+    
     if not topics: topics = ["AI Automation Trends"]
 
     os.makedirs(".tmp/articles", exist_ok=True)
@@ -51,7 +60,7 @@ def main():
         if client:
             prompt = f"Create JSON article for {topic}. Keys: title, summary, key_points."
             try:
-                resp = retry_with_backoff(client.models.generate_content, model='models/gemini-2.0-flash', contents=prompt)
+                resp = retry_with_backoff(client.models.generate_content, model='gemini-1.5-flash', contents=prompt)
                 if resp:
                     text = resp.text.replace("```json", "").replace("```", "").strip()
                     data = json.loads(text)
@@ -67,7 +76,7 @@ def main():
             }
             
         safe = "".join(c for c in topic if c.isalnum()).rstrip()
-        with open(f".tmp/articles/article_{safe}.json", "w") as f:
+        with open(f".tmp/articles/article_{safe}.json", "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
 
 if __name__ == "__main__":

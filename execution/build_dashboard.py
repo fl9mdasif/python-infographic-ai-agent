@@ -4,6 +4,7 @@ Directive: directives/04_build_dashboard.md
 """
 import os
 import glob
+import re
 import json
 
 def main():
@@ -23,7 +24,7 @@ def main():
     # Articles
     articles_html = ""
     for af in glob.glob(".tmp/articles/*.json"):
-        with open(af, "r") as f:
+        with open(af, "r", encoding="utf-8") as f:
             d = json.load(f)
             articles_html += f"<div class='card'><h3>{d.get('title', 'Untitled')}</h3><p>{d.get('summary', '')}</p></div>"
 
@@ -44,7 +45,7 @@ def main():
     <div class='card'><h2>Articles</h2>{articles_html}</div>
     </body></html>"""
     
-    with open(".tmp/index.html", "w") as f:
+    with open(".tmp/index.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("Dashboard saved: .tmp/index.html")
 

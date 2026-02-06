@@ -7,6 +7,8 @@ import glob
 import re
 import urllib.parse
 import urllib.request
+import time
+import random
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,18 +19,29 @@ def main():
     if files:
         with open(max(files, key=os.path.getctime), "r", encoding="utf-8") as f: content = f.read()
         
-        # New Digest Regex:
-        # ### [newest submissions : sub] Title
-        # 🔗 Link
-        #     Summary
-        matches = re.findall(r'### \[.*?\] (.*?)\n🔗 .*?\n\s+(.*)', content)
+    if files:
+        with open(max(files, key=os.path.getctime), "r", encoding="utf-8") as f: content = f.read()
         
+        # Format:
+        # **Insight**: Title - Summary...
+        # **Source**: ...
+        matches = re.findall(r'\*\*Insight\*\*: (.*)', content)
+        
+        topics = []
         if matches:
-            topics = matches # List of (Title, Summary) tuples
+            for m in matches:
+                # Split title and idea
+                if " - " in m:
+                    parts = m.split(" - ", 1)
+                    title = parts[0]
+                    idea = parts[1]
+                else:
+                    title = m[:40]
+                    idea = m
+                topics.append((title, idea))
         else:
             # Fallback
-            titles = re.findall(r'### \[.*?\] (.*)', content)[:3]
-            topics = [(t, "Innovative AI automation trend") for t in titles]
+            topics = [("AI Automation", "Future of work")]
 
     if not topics: topics = [("AI Automation", "Future of work and agents"), ("Future Tech", "New developments in robotics")]
     
@@ -40,62 +53,102 @@ def main():
     api_key = os.getenv("GEMINI_API_KEY")
     client = None
     if api_key:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=api_key)
+        try:
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=api_key)
+        except ImportError:
+            print("Warning: google-genai library not found. Gemini generation will be skipped.")
     
+    def generate_with_retry(client, model_id, prompt_text, path):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                print(f"  Requesting Gemini ({model_id}) [IMAGE Mode] - Attempt {attempt+1}...")
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=prompt_text,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio="16:9"
+                        )
+                    )
+                )
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            with open(path, "wb") as f:
+                                f.write(part.inline_data.data)
+                            return True
+            except Exception as e:
+                if "429" in str(e) or "quota" in str(e).lower():
+                    print(f"    Quota hit. Waiting {35 * (attempt + 1)}s...")
+                    time.sleep(35 * (attempt + 1))
+                else:
+                    print(f"    Error: {e}")
+                    break
+        return False
+
     for title, idea in topics:
         print(f"Generating visual for: {title}")
-        print(f"  Context: {idea[:50]}...")
-        
-        # Enhanced Prompt (Neon/Tech)
-        prompt = (
-            f"Professional tech infographic about '{title}'. "
-            f"Central theme: {idea}. "
-            f"Style: Dark Mode background (Hex #0f0f0f), glowing neon purple and blue data visualization. "
-            f"Layout: Central complex network diagram connecting nodes. "
-            f"Bottom section: Key takeaways with tech icons. "
-            f"Aesthetic: Cyberpunk, Futuristic, High-Tech, 8k resolution, highly detailed vector art."
+        prompt_text = (
+            f"High-tech infographic for: {title}. "
+            f"Theme: {idea}. "
+            f"Style: Neon blue and purple, dark background, detailed tech nodes, clean vector aesthetic."
         )
         
         safe = "".join(c for c in title if c.isalnum()).rstrip()
         path = f".tmp/visuals/{safe}.png"
         
+        # Strictly use Gemini 2.5 Flash Image per documentation
+        model_id = "models/gemini-2.5-flash"
         success = False
+        if client: # Only attempt Gemini if client is initialized
+            success = generate_with_retry(client, model_id, prompt_text, path)
         
-        # 1. Try Gemini (Imagen)
-        if client:
-            try:
-                print("  Requesting Gemini (Imagen)...")
-                # Using standard Imagen mode if available, or the one user had.
-                # 'models/imagen-3.0-generate-001' is common for v2
-                response = client.models.generate_images(
-                    model='models/imagen-3.0-generate-001',
-                    prompt=prompt,
-                    config=types.GenerateImagesConfig(
-                        number_of_images=1,
-                    )
-                )
-                if response.generated_images:
-                    image_bytes = response.generated_images[0].image.image_bytes
-                    with open(path, "wb") as f:
-                        f.write(image_bytes)
-                    print(f"  ✅ Saved (Gemini): {path}")
-                    success = True
-            except Exception as e:
-                print(f"  ❌ Gemini Image Gen failed: {e}")
-        
-        # 2. Fallback to Pollinations (if Gemini fails or no key)
-        if not success:
-            print("  ⚠️ Fallback to Pollinations.ai...")
-            url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=1024&height=1024&nologo=true"
-            try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response, open(path, 'wb') as out_file:
-                    out_file.write(response.read())
-                print(f"  ✅ Saved (Pollinations): {path}")
-            except Exception as e:
-                print(f"  ❌ Fallback failed: {e}")
+        if success:
+            print(f"  ✅ Saved: {path}")
+        else:
+            print(f"  ❌ Gemini failed (or skipped). Falling back to Pollinations for: {title}")
+            
+            pollinations_key = os.getenv("POLLINATIONS_API_KEY")
+            # Encode the prompt
+            encoded_prompt = urllib.parse.quote(prompt_text)
+            # Use random seed to vary results
+            seed = random.randint(0, 100000)
+            
+            # Construct URL - trying Flux model as it is often higher quality/stable
+            url = f"https://gen.pollinations.ai/image/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true&model=flux"
+            
+            # Retry logic for Pollinations
+            pollinations_success = False
+            for attempt in range(1, 4):
+                try:
+                    print(f"    Requesting Pollinations (Attempt {attempt})...")
+                    req = urllib.request.Request(url)
+                    req.add_header('User-Agent', 'Mozilla/5.0')
+                    if pollinations_key:
+                        req.add_header('Authorization', f'Bearer {pollinations_key}')
+                        
+                    with urllib.request.urlopen(req, timeout=60) as response:
+                        if response.getcode() == 200:
+                            content = response.read()
+                            with open(path, 'wb') as out_file:
+                                out_file.write(content)
+                            print(f"  ✅ Saved (Pollinations): {path}")
+                            pollinations_success = True
+                            success = True
+                            break
+                        else:
+                            print(f"    Pollinations returned status: {response.getcode()}")
+                except Exception as e:
+                    print(f"    Pollinations Error (Attempt {attempt}): {e}")
+                    # If 502 or network error, wait a bit
+                    time.sleep(2 * attempt)
+            
+            if not pollinations_success:
+                print(f"  ❌ Pollinations failed after retries for: {title}")
 
 if __name__ == "__main__":
     main()
